@@ -287,18 +287,23 @@ fun SubjectItem(subject: Subject, letter: String, onClick: () -> Unit) {
     val review = counts[Status.YELLOW] ?: 0
     val mastered = counts[Status.GREEN] ?: 0
 
-    Column(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Box(contentAlignment = Alignment.Center) {
             CircularProgress(weak, review, mastered)
             Text(letter, fontSize = 48.sp, fontWeight = FontWeight.Bold)
         }
-        Spacer(Modifier.height(16.dp))
-        Text(subject.name, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text("$weak Weak • $review Review • $mastered Mastered", fontSize = 14.sp, color = Color.Gray)
+        Spacer(Modifier.width(24.dp))
+        Column {
+            Text(subject.name, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text("$weak Weak • $review Review • $mastered Mastered", fontSize = 14.sp, color = Color.Gray)
+        }
     }
 }
 
@@ -319,7 +324,7 @@ fun CircularProgress(weak: Int, review: Int, mastered: Int) {
             if (mastered > 0) {
                 drawArc(
                     Status.GREEN.color, startAngle, masteredAngle, false,
-                    style = Stroke(strokeWidth, cap = StrokeCap.Round),
+                    style = Stroke(strokeWidth),
                     topLeft = Offset(strokeWidth / 2, strokeWidth / 2),
                     size = Size(size.width - strokeWidth, size.height - strokeWidth)
                 )
@@ -328,7 +333,7 @@ fun CircularProgress(weak: Int, review: Int, mastered: Int) {
             if (review > 0) {
                 drawArc(
                     Status.YELLOW.color, startAngle, reviewAngle, false,
-                    style = Stroke(strokeWidth, cap = StrokeCap.Round),
+                    style = Stroke(strokeWidth),
                     topLeft = Offset(strokeWidth / 2, strokeWidth / 2),
                     size = Size(size.width - strokeWidth, size.height - strokeWidth)
                 )
@@ -337,7 +342,7 @@ fun CircularProgress(weak: Int, review: Int, mastered: Int) {
             if (weak > 0) {
                 drawArc(
                     Status.RED.color, startAngle, weakAngle, false,
-                    style = Stroke(strokeWidth, cap = StrokeCap.Round),
+                    style = Stroke(strokeWidth),
                     topLeft = Offset(strokeWidth / 2, strokeWidth / 2),
                     size = Size(size.width - strokeWidth, size.height - strokeWidth)
                 )
@@ -473,16 +478,38 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
         Modifier
             .fillMaxWidth()
             .clickable { showMenu = true }
-            .padding(16.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(12.dp).background(chapter.status.color, CircleShape))
-        Spacer(Modifier.width(16.dp))
-        Text(chapter.name, Modifier.weight(1f))
-        IconButton(onClick = { onAttachNote(chapter) }, Modifier.size(24.dp)) {
-            Icon(Icons.Default.Add, null, Modifier.size(20.dp), tint = Color.Gray)
+        // Status dot
+        Box(
+            Modifier
+                .size(16.dp)
+                .background(chapter.status.color, CircleShape)
+        )
+        Spacer(Modifier.width(20.dp))
+
+        // Chapter name
+        Text(
+            text = chapter.name,
+            fontSize = 16.sp,
+            color = Color.Black,
+            modifier = Modifier.weight(1f)
+        )
+
+        // Action icons
+        IconButton(
+            onClick = { onAttachNote(chapter) },
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                Icons.Default.Add,
+                contentDescription = "Attach note",
+                modifier = Modifier.size(20.dp),
+                tint = Color.Gray
+            )
         }
-        Spacer(Modifier.width(8.dp))
+
         IconButton(
             onClick = {
                 val next = when (chapter.status) {
@@ -492,13 +519,30 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
                 }
                 DataRepository.updateChapterStatus(context, chapter, next)
             },
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(36.dp)
         ) {
-            Icon(Icons.Default.Refresh, null, Modifier.size(20.dp), tint = Color.Gray)
+            Icon(
+                Icons.Default.Refresh,
+                contentDescription = "Update status",
+                modifier = Modifier.size(20.dp),
+                tint = Color.Gray
+            )
         }
-        Spacer(Modifier.width(16.dp))
-        Surface(color = Color.Black, shape = MaterialTheme.shapes.small) {
-            Text(statusLabel, color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+
+        Spacer(Modifier.width(12.dp))
+
+        // Status label
+        Surface(
+            color = Color.Black,
+            shape = MaterialTheme.shapes.small
+        ) {
+            Text(
+                text = statusLabel,
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
         }
     }
 
