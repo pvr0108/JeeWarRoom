@@ -376,8 +376,7 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chapter List", fontSize = 28.sp, fontWeight = FontWeight.Bold) },
-                navigationIcon = {
+                title = { Text("Chapter List", fontWeight = FontWeight.Bold) },                navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         Icon(Icons.Default.ArrowBack, "Back")
                     }
@@ -410,28 +409,40 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            // Filter
-            Column(
+            // Header row with title and filter
+            Row(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { showFilter = !showFilter }
-                    .padding(16.dp)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Filter by Status", color = Color.Gray)
-                    Icon(
-                        if (showFilter) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        null,
-                        tint = Color.Gray
-                    )
-                }
-                if (showFilter) {
-                    Spacer(Modifier.height(12.dp))
-                    FilterRow("Weak", filterRed) { filterRed = it }
-                    FilterRow("Review", filterYellow) { filterYellow = it }
-                    FilterRow("Mastered", filterGreen) { filterGreen = it }
+
+                Box {
+                    OutlinedButton(
+                        onClick = { showFilter = !showFilter },
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("Filter", fontSize = 14.sp)
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            if (showFilter) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showFilter,
+                        onDismissRequest = { showFilter = false }
+                    ) {
+                        FilterMenuItem("Weak", filterRed) { filterRed = it }
+                        FilterMenuItem("Review", filterYellow) { filterYellow = it }
+                        FilterMenuItem("Mastered", filterGreen) { filterGreen = it }
+                    }
                 }
             }
+
             HorizontalDivider(color = Color.LightGray.copy(0.3f))
 
             // Chapters
@@ -450,129 +461,96 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
 }
 
 @Composable
-fun FilterRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Checkbox(checked, onCheckedChange)
-        Spacer(Modifier.width(8.dp))
-        Text(label)
-    }
+fun FilterMenuItem(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = checked,
+                    onCheckedChange = onCheckedChange
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(label)
+            }
+        },
+        onClick = { onCheckedChange(!checked) }
+    )
 }
 
 @Composable
 fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
     val context = LocalContext.current
-    var showMenu by remember { mutableStateOf(false) }
-    val statusLabel = when (chapter.status) {
+
+    val actionButton = when (chapter.status) {
+        Status.RED -> "Mark for Review"
+        Status.YELLOW -> "Mark Completed"
         Status.GREEN -> "✨ Chill"
-        Status.YELLOW -> "Revise Concepts"
-        Status.RED -> "Start Reading"
     }
 
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { showMenu = true }
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Status dot
-        Box(
-            Modifier
-                .size(16.dp)
-                .background(chapter.status.color, CircleShape)
-        )
+        Box(Modifier.size(16.dp).background(chapter.status.color, CircleShape))
         Spacer(Modifier.width(20.dp))
+        Text(chapter.name, fontSize = 16.sp, modifier = Modifier.weight(1f))
 
-        // Chapter name
-        Text(
-            text = chapter.name,
-            fontSize = 16.sp,
-            color = Color.Black,
-            modifier = Modifier.weight(1f)
-        )
-
-        // Action icons
-        IconButton(
-            onClick = { onAttachNote(chapter) },
-            modifier = Modifier.size(36.dp)
-        ) {
-            Icon(
-                Icons.Default.Add,
-                contentDescription = "Attach note",
-                modifier = Modifier.size(20.dp),
-                tint = Color.Gray
-            )
+        IconButton(onClick = { onAttachNote(chapter) }, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Default.Add, null, Modifier.size(20.dp), tint = Color.Gray)
         }
 
         IconButton(
             onClick = {
-                val next = when (chapter.status) {
-                    Status.RED -> Status.YELLOW
-                    Status.YELLOW -> Status.GREEN
-                    Status.GREEN -> Status.GREEN
+                val prev = when (chapter.status) {
+                    Status.GREEN -> Status.YELLOW
+                    Status.YELLOW -> Status.RED
+                    Status.RED -> Status.RED
                 }
-                DataRepository.updateChapterStatus(context, chapter, next)
+                if (prev != chapter.status) {
+                    DataRepository.updateChapterStatus(context, chapter, prev)
+                }
             },
             modifier = Modifier.size(36.dp)
         ) {
-            Icon(
-                Icons.Default.Refresh,
-                contentDescription = "Update status",
-                modifier = Modifier.size(20.dp),
-                tint = Color.Gray
-            )
+            Icon(Icons.Default.Refresh, null, Modifier.size(20.dp), tint = Color.Gray)
         }
 
         Spacer(Modifier.width(12.dp))
 
-        // Status label
-        Surface(
-            color = Color.Black,
-            shape = MaterialTheme.shapes.small
-        ) {
+        if (chapter.status == Status.GREEN) {
+            // Green status - show green text
             Text(
-                text = statusLabel,
-                color = Color.White,
+                text = actionButton,
                 fontSize = 13.sp,
-                fontWeight = FontWeight.Normal,
+                fontWeight = FontWeight.SemiBold,
+                color = Status.GREEN.color,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
+        } else {
+            // Red or Yellow status - show black button
+            Button(
+                onClick = {
+                    when (chapter.status) {
+                        Status.RED -> DataRepository.updateChapterStatus(context, chapter, Status.YELLOW)
+                        Status.YELLOW -> DataRepository.updateChapterStatus(context, chapter, Status.GREEN)
+                        Status.GREEN -> { }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Black,
+                    contentColor = Color.White
+                ),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.height(36.dp)
+            ) {
+                Text(actionButton, fontSize = 13.sp)
+            }
         }
-    }
-
-    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-        DropdownMenuItem(text = { Text("Mark as Weak") }, onClick = {
-            showMenu = false
-            DataRepository.updateChapterStatus(context, chapter, Status.RED)
-        })
-        DropdownMenuItem(text = { Text("Mark as Review") }, onClick = {
-            showMenu = false
-            DataRepository.updateChapterStatus(context, chapter, Status.YELLOW)
-        })
-        DropdownMenuItem(text = { Text("Mark as Mastered") }, onClick = {
-            showMenu = false
-            DataRepository.updateChapterStatus(context, chapter, Status.GREEN)
-        })
-        if (chapter.noteUri != null) {
-            DropdownMenuItem(text = { Text("Open Note") }, onClick = {
-                showMenu = false
-                DataRepository.openNote(context, chapter.noteUri!!)
-            })
-        }
-        DropdownMenuItem(text = { Text("Attach Note") }, onClick = {
-            showMenu = false
-            onAttachNote(chapter)
-        })
-        DropdownMenuItem(text = { Text("Delete") }, onClick = {
-            showMenu = false
-            DataRepository.deleteChapter(context, chapter)
-        })
     }
 }
 
@@ -610,8 +588,51 @@ fun AddDialog(subject: Subject, onDismiss: () -> Unit) {
 fun TermsDialog(onAccept: () -> Unit) {
     AlertDialog(
         onDismissRequest = {},
-        title = { Text("Terms & Conditions") },
-        text = { Text("Welcome to JEE War Room!\n\nThis app helps track your JEE prep.\n\nGood luck! 🚀") },
-        confirmButton = { Button(onClick = onAccept) { Text("Accept") } }
+        title = {
+            Text(
+                "Welcome to JEE War Room 🎯",
+                fontWeight = FontWeight.Bold,
+                fontSize = 20.sp
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    "\"Success is the sum of small efforts repeated day in and day out.\"",
+                    fontSize = 14.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    color = Color.Gray
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "This app tracks your JEE grind. Every chapter you complete, every concept you master - it all counts. No shortcuts, just consistent progress.",
+                    fontSize = 14.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "By continuing, you agree to:",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("• Put in the work, not just track it", fontSize = 13.sp)
+                Text("• Stay consistent with your prep", fontSize = 13.sp)
+                Text("• Take responsibility for your progress", fontSize = 13.sp)
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Let's get this rank. 💪",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onAccept,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Accept & Continue")
+            }
+        }
     )
 }
