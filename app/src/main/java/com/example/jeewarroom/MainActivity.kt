@@ -10,8 +10,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -33,7 +36,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.material3.MaterialTheme
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 
@@ -176,29 +178,56 @@ object DataRepository {
     }
 }
 
+// ─────────────────────────────────────────────
 // Main Activity
+// ─────────────────────────────────────────────
 class MainActivity : ComponentActivity() {
+
+    private companion object {
+        const val KEY_PENDING_CHAPTER_ID = "pending_chapter_id"
+    }
+
     private val filePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
-            contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            try {
+                contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // URI doesn't support persistable permissions
+            }
             currentChapterForNote?.let { chapter ->
                 DataRepository.updateChapterNote(this, chapter, it)
             }
         }
+        currentChapterForNote = null
     }
+
     private var currentChapterForNote: Chapter? = null
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        currentChapterForNote?.let {
+            outState.putInt(KEY_PENDING_CHAPTER_ID, it.id)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DataRepository.initialize(this)
 
+        savedInstanceState?.let { bundle ->
+            val pendingId = bundle.getInt(KEY_PENDING_CHAPTER_ID, -1)
+            if (pendingId != -1) {
+                currentChapterForNote = DataRepository.chapters.firstOrNull { it.id == pendingId }
+            }
+        }
+
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.White) {
                     var showTermsDialog by remember { mutableStateOf(!DataRepository.isTermsAccepted(this)) }
-                    var selectedSubject by remember { mutableStateOf<Subject?>(null) }
+                    var selectedSubject by rememberSaveable { mutableStateOf<Subject?>(null) }
 
                     if (showTermsDialog) {
                         TermsDialog(onAccept = {
@@ -214,7 +243,7 @@ class MainActivity : ComponentActivity() {
                                 onBackClick = { selectedSubject = null },
                                 onAttachNote = { chapter ->
                                     currentChapterForNote = chapter
-                                    filePickerLauncher.launch("application/pdf")
+                                    filePickerLauncher.launch(arrayOf("application/pdf"))
                                 }
                             )
                         }
@@ -361,6 +390,7 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     var filterRed by remember { mutableStateOf(true) }
     var filterYellow by remember { mutableStateOf(true) }
     var filterGreen by remember { mutableStateOf(true) }
+    var chapterToDelete by remember { mutableStateOf<Chapter?>(null) }
 
     BackHandler { onBackClick() }
 
@@ -376,7 +406,8 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chapter List", fontWeight = FontWeight.Bold) },                navigationIcon = {
+                title = { Text("Chapter List", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         Icon(Icons.Default.ArrowBack, "Back")
                     }
@@ -409,7 +440,6 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            // Header row with title and filter
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -417,7 +447,6 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-
                 Box {
                     OutlinedButton(
                         onClick = { showFilter = !showFilter },
@@ -445,10 +474,13 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
 
             HorizontalDivider(color = Color.LightGray.copy(0.3f))
 
-            // Chapters
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filteredChapters) { chapter ->
-                    ChapterRow(chapter, onAttachNote)
+                    ChapterRow(
+                        chapter = chapter,
+                        onAttachNote = onAttachNote,
+                        onLongPress = { selectedChapter -> chapterToDelete = selectedChapter }
+                    )
                     HorizontalDivider(color = Color.LightGray.copy(0.3f))
                 }
             }
@@ -457,6 +489,25 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
 
     if (showAddDialog) {
         AddDialog(subject) { showAddDialog = false }
+    }
+
+    if (chapterToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { chapterToDelete = null },
+            title = { Text("Delete Chapter?") },
+            text = { Text("Are you sure you want to delete '${chapterToDelete?.name}' from your war room?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        DataRepository.deleteChapter(context, chapterToDelete!!)
+                        chapterToDelete = null
+                    }
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { chapterToDelete = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 
@@ -480,8 +531,13 @@ fun FilterMenuItem(label: String, checked: Boolean, onCheckedChange: (Boolean) -
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
+fun ChapterRow(
+    chapter: Chapter,
+    onAttachNote: (Chapter) -> Unit,
+    onLongPress: (Chapter) -> Unit
+) {
     val context = LocalContext.current
 
     val actionButton = when (chapter.status) {
@@ -490,9 +546,16 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
         Status.GREEN -> "✨ Chill"
     }
 
+    val hasNote = chapter.noteUri != null
+    val noteTint = if (hasNote) Color(0xFF66BB6A) else Color.Gray
+
     Row(
         Modifier
             .fillMaxWidth()
+            .combinedClickable(
+                onClick = {},
+                onLongClick = { onLongPress(chapter) }
+            )
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -500,8 +563,18 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
         Spacer(Modifier.width(20.dp))
         Text(chapter.name, fontSize = 16.sp, modifier = Modifier.weight(1f))
 
-        IconButton(onClick = { onAttachNote(chapter) }, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Default.Add, null, Modifier.size(20.dp), tint = Color.Gray)
+        IconButton(
+            onClick = {
+                if (hasNote) {
+                    DataRepository.openNote(context, chapter.noteUri!!)
+                } else {
+                    onAttachNote(chapter)
+                }
+            },
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = if (hasNote) "Open Note" else "Attach Note",
+                modifier = Modifier.size(20.dp), tint = noteTint)
         }
 
         IconButton(
@@ -523,7 +596,6 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
         Spacer(Modifier.width(12.dp))
 
         if (chapter.status == Status.GREEN) {
-            // Green status - show green text
             Text(
                 text = actionButton,
                 fontSize = 13.sp,
@@ -532,7 +604,6 @@ fun ChapterRow(chapter: Chapter, onAttachNote: (Chapter) -> Unit) {
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
         } else {
-            // Red or Yellow status - show black button
             Button(
                 onClick = {
                     when (chapter.status) {
