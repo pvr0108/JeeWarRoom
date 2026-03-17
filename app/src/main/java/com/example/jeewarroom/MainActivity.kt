@@ -707,3 +707,4 @@ fun TermsDialog(onAccept: () -> Unit) {
         }
     )
 }
+//HI
