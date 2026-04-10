@@ -11,15 +11,12 @@ Built with the philosophy: **No shortcuts, just consistent progress.**
 ## ✨ Features
 
 - **Subject Dashboard** - Visual progress rings showing weak/review/mastered chapters for Physics, Chemistry, and Maths
-- **Smart Status Tracking** - Context-aware action buttons that adapt based on chapter status
 - **Chapter Management** - Add, delete, and organize chapters with long-press delete confirmation
 - **PDF Note Attachment** - Link PDF notes to specific chapters for quick access
 - **Status Filtering** - Filter chapters by Weak/Review/Mastered status
-- **Progress Visualization** - Circular progress indicators showing your preparation status
 - **Persistent Storage** - All data saved locally using SharedPreferences
-- **First-Time Onboarding** - Motivational Terms & Conditions on first launch
 
-**[ADD SCREENSHOT HERE: Main dashboard showing all three subjects with progress rings]**
+*screenshot*
 
 ## 🛠️ Tech Stack
 
@@ -45,7 +42,7 @@ Built with the philosophy: **No shortcuts, just consistent progress.**
 **[ADD SCREENSHOT HERE: First-time onboarding screen with motivational message]**
 
 ## 🚀 Installation
-
+### Using Android Studio ###
 1. Clone the repository:
 ```bash
 git clone https://github.com/yourusername/jee-war-room.git
@@ -55,7 +52,13 @@ git clone https://github.com/yourusername/jee-war-room.git
 
 3. Build and run on your device or emulator
 
+
 **No external dependencies or API keys required!**
+
+### Installing apk ###
+
+Go to *Releases* and download latest stable release version.apk file and install
+
 
 ## 📂 Project Structure
 
