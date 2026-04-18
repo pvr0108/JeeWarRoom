@@ -9,6 +9,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -48,15 +49,31 @@ import androidx.compose.ui.window.DialogProperties
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 
+@Serializable
+data class BackupData(
+    val chapters: List<Chapter>,
+    val studyHistory: List<StudyRecord>
+)
+
+@Serializable
 enum class Subject { PHYSICS, CHEMISTRY, MATHS }
 enum class AppTheme(val label: String) { SYSTEM("System Default"), LIGHT("Light Mode"), DARK("Dark Mode") }
-enum class Status(val color: Color) { RED(Color(0xFFEF5350)), YELLOW(Color(0xFFFFC107)), GREEN(Color(0xFF66BB6A)) }
+@Serializable
+enum class Status(@Transient val lightColor: Color, @Transient val darkColor: Color) {
+    RED(Color(0xFFBA1A1A), Color(0xFFFFB4AB)),
+    YELLOW(Color(0xFF715B00), Color(0xFFE3C339)),
+    GREEN(Color(0xFF006D3B), Color(0xFF6CDB97))
+}
 enum class SortMode(val label: String) {
     ASCENDING("A-Z"),
     DESCENDING("Z-A"),
@@ -65,6 +82,7 @@ enum class SortMode(val label: String) {
     DATE_OLDEST("Oldest")
 }
 
+@Serializable
 data class Chapter(
     val id: Int,
     val name: String,
@@ -75,6 +93,7 @@ data class Chapter(
     var lastModified: Long = System.currentTimeMillis()
 )
 
+@Serializable
 data class StudyRecord(
     val id: Long = System.currentTimeMillis(),
     val date: String,
@@ -83,6 +102,18 @@ data class StudyRecord(
     val isBreak: Boolean,
     val mode: String
 )
+
+fun saveBackupToUri(context: Context, uri: Uri, jsonData: String) {
+    try {
+        context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+            outputStream.write(jsonData.toByteArray())
+            outputStream.flush()
+        }
+        Toast.makeText(context, "Backup Saved!", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
 
 object DataRepository {
     private const val PREFS_NAME = "JeeWarRoomPrefs"
@@ -258,16 +289,12 @@ object DataRepository {
     }
 }
 
-// ─────────────────────────────────────────────
-// GLOBAL TIMER ENGINE (Survives Minimizing & Navigation)
-// ─────────────────────────────────────────────
 object TimerManager {
     var isStopwatchMode by mutableStateOf(false)
     var studyMinutes by mutableIntStateOf(25)
     var breakMinutes by mutableIntStateOf(5)
     var autoStartBreaks by mutableStateOf(false)
 
-    // NEW: Tracks the total time allocated to the current phase so math is always perfect
     var currentPhaseTotalSeconds by mutableIntStateOf(25 * 60)
     var timeLeftSeconds by mutableIntStateOf(25 * 60)
     var stopwatchSeconds by mutableIntStateOf(0)
@@ -296,22 +323,19 @@ object TimerManager {
         timerJob = CoroutineScope(Dispatchers.Main).launch {
             var lastTickTime = System.currentTimeMillis()
             while (isTimerRunning) {
-                delay(200L) // Check 5 times a second for precise catch-up
+                delay(200L)
                 val now = System.currentTimeMillis()
                 val deltaMs = now - lastTickTime
 
-                // If 1 full second has passed (or fast-forward if app was minimized)
                 if (deltaMs >= 1000L) {
                     val deltaSeconds = (deltaMs / 1000L).toInt()
-                    lastTickTime += deltaSeconds * 1000L // Maintain absolute precision
+                    lastTickTime += deltaSeconds * 1000L
 
                     if (isStopwatchMode) {
                         if (isStudyPhase) {
                             val milestone = studyMinutes * 60
                             val prev = stopwatchSeconds
                             stopwatchSeconds += deltaSeconds
-
-                            // Milestone Nudge Logic
                             if (milestone > 0 && prev / milestone < stopwatchSeconds / milestone) {
                                 showPhaseCompleteDialog = true
                             }
@@ -327,7 +351,6 @@ object TimerManager {
                         timeLeftSeconds -= deltaSeconds
                         if (prev > 0 && timeLeftSeconds <= 0) {
                             if (autoStartBreaks) {
-                                // Mathematical perfection: Total allocated time minus whatever the clock says
                                 val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
                                 DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
 
@@ -346,7 +369,6 @@ object TimerManager {
 
     fun skipOrRecord(context: Context) {
         if (!isStopwatchMode) {
-            // Mathematical perfection: Total allocated time minus whatever the clock says
             val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
             if (actualTime > 0) {
                 DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
@@ -460,6 +482,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun HistoryScreen(onBackClick: () -> Unit) {
     val context = LocalContext.current
+    val isDark = isSystemInDarkTheme()
     BackHandler { onBackClick() }
 
     Scaffold(
@@ -494,7 +517,7 @@ fun HistoryScreen(onBackClick: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(DataRepository.studyHistory) { record ->
-                    val color = if (record.isBreak) Status.GREEN.color else MaterialTheme.colorScheme.primary
+                    val color = if (record.isBreak) (if (isDark) Status.GREEN.darkColor else Status.GREEN.lightColor) else MaterialTheme.colorScheme.primary
                     val hours = record.durationSeconds / 3600
                     val minutes = (record.durationSeconds % 3600) / 60
                     val seconds = record.durationSeconds % 60
@@ -544,14 +567,13 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
     }
 
     var showStudyInfo by remember { mutableStateOf(false) }
-    var showBreakInfo by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("War Room Timer", fontWeight = FontWeight.Bold) },
+                title = { Text("War Room Timer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) { Icon(Icons.Default.ArrowBack, "Back") }
+                    IconButton(onClick = onBackClick) { Icon(Icons.Default.ArrowBack, null) }
                 }
             )
         }
@@ -560,10 +582,9 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
             modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-
-            // Mode Slider
+            // Mode Switcher
             Row(
-                modifier = Modifier.fillMaxWidth(0.8f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(50)).padding(4.dp),
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp),
                 horizontalArrangement = Arrangement.Center
             ) {
                 Box(
@@ -594,182 +615,127 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                     Text("Stopwatch", fontWeight = FontWeight.Bold, color = if (TimerManager.isStopwatchMode) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+
             Spacer(Modifier.height(32.dp))
 
+            // Phase Indicator
             AnimatedVisibility(visible = !TimerManager.isStopwatchMode || !TimerManager.isStudyPhase) {
+                val isDark = isSystemInDarkTheme()
+                val phaseColor = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else (if (isDark) Status.GREEN.darkColor else Status.GREEN.lightColor)
                 Surface(
-                    color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primaryContainer else Status.GREEN.color.copy(alpha = 0.2f),
-                    shape = CircleShape,
+                    color = phaseColor.copy(alpha = 0.1f),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.padding(bottom = 24.dp)
                 ) {
                     Text(
-                        if (TimerManager.isStudyPhase) "🔥 FOCUS MODE" else "☕ BREAK TIME",
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.onPrimaryContainer else Status.GREEN.color,
+                        if (TimerManager.isStudyPhase) "FOCUS" else "BREAK",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        color = phaseColor,
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
-            if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) Spacer(Modifier.height(48.dp))
 
             // Clock Display
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(280.dp)) {
-                val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
-                val progressColor = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else {
-                    if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else Status.GREEN.color
-                }
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(300.dp)) {
+                val isDark = isSystemInDarkTheme()
+                val trackColor = MaterialTheme.colorScheme.surfaceVariant
+                val progressColor = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else (if (isDark) Status.GREEN.darkColor else Status.GREEN.lightColor)
 
-                // Calculates arc based on currentPhaseTotalSeconds so +5 mins seamlessly adjusts!
                 val targetSweepAngle = if (TimerManager.isStopwatchMode) {
-                    if (TimerManager.isStudyPhase) {
-                        (TimerManager.stopwatchSeconds % 60) / 60f * 360f
-                    } else {
-                        val t = TimerManager.currentPhaseTotalSeconds
-                        if (t > 0) (max(TimerManager.timeLeftSeconds, 0).toFloat() / t) * 360f else 0f
-                    }
+                    if (TimerManager.isStudyPhase) (TimerManager.stopwatchSeconds % 60) / 60f * 360f
+                    else (max(TimerManager.timeLeftSeconds, 0).toFloat() / (TimerManager.breakMinutes * 60)) * 360f
                 } else {
-                    val t = TimerManager.currentPhaseTotalSeconds
-                    if (t > 0) (max(TimerManager.timeLeftSeconds, 0).toFloat() / t) * 360f else 0f
+                    val total = if (TimerManager.isStudyPhase) TimerManager.studyMinutes * 60 else TimerManager.breakMinutes * 60
+                    if (total > 0) (max(TimerManager.timeLeftSeconds, 0).toFloat() / total) * 360f else 0f
                 }
 
-                val animatedSweepAngle by animateFloatAsState(targetValue = targetSweepAngle, animationSpec = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) tween(0) else tween(1000, easing = LinearEasing), label = "sweep")
+                val animatedSweepAngle by animateFloatAsState(targetValue = targetSweepAngle, animationSpec = tween(500, easing = LinearOutSlowInEasing), label = "sweep")
 
                 Canvas(modifier = Modifier.fillMaxSize()) {
-                    val strokeW = 14.dp.toPx()
+                    val strokeW = 8.dp.toPx()
                     drawCircle(trackColor, style = Stroke(strokeW))
                     drawArc(color = progressColor, startAngle = -90f, sweepAngle = animatedSweepAngle, useCenter = false, style = Stroke(strokeW, cap = StrokeCap.Round))
                 }
 
-                val isNegative = (!TimerManager.isStopwatchMode && TimerManager.timeLeftSeconds < 0) || (TimerManager.isStopwatchMode && !TimerManager.isStudyPhase && TimerManager.timeLeftSeconds < 0)
                 val displaySeconds = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) TimerManager.stopwatchSeconds else TimerManager.timeLeftSeconds
                 val absSeconds = abs(displaySeconds)
                 val h = absSeconds / 3600
                 val m = (absSeconds % 3600) / 60
                 val s = absSeconds % 60
-                val sign = if (isNegative) "-" else ""
+                val isNegative = displaySeconds < 0
 
-                val timeString = if (h > 0) String.format("%s%02d:%02d:%02d", sign, h, m, s) else String.format("%s%02d:%02d", sign, m, s)
-
-                Text(
-                    text = timeString,
-                    style = MaterialTheme.typography.displayLarge.copy(fontSize = if (h > 0) 56.sp else 72.sp, fontWeight = FontWeight.Black),
-                    color = if (isNegative) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onBackground
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = if (h > 0) String.format("%s%02d:%02d:%02d", if (isNegative) "-" else "", h, m, s) else String.format("%s%02d:%02d", if (isNegative) "-" else "", m, s),
+                        style = MaterialTheme.typography.displayLarge.copy(fontSize = if (h > 0) 48.sp else 64.sp, fontWeight = FontWeight.Bold),
+                        color = if (isNegative) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
             Spacer(Modifier.height(48.dp))
 
             // Controls
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                FilledTonalIconButton(onClick = { TimerManager.resetTimer() }, modifier = Modifier.size(56.dp)) {
-                    Icon(Icons.Default.Refresh, "Reset")
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedIconButton(onClick = { TimerManager.resetTimer() }, modifier = Modifier.size(56.dp)) {
+                    Icon(Icons.Default.Refresh, null)
                 }
 
-                val fabContainerColor by animateColorAsState(targetValue = if (TimerManager.isTimerRunning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primary, animationSpec = tween(400), label="c")
-                val fabContentColor by animateColorAsState(targetValue = if (TimerManager.isTimerRunning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary, animationSpec = tween(400), label="c2")
-
-                FloatingActionButton(onClick = { TimerManager.toggleTimer(context) }, modifier = Modifier.size(72.dp), containerColor = fabContainerColor, contentColor = fabContentColor) {
-                    AnimatedContent(targetState = TimerManager.isTimerRunning, transitionSpec = { (scaleIn(tween(300)) + fadeIn(tween(300))).togetherWith(scaleOut(tween(300)) + fadeOut(tween(300))) }, label = "play") { running ->
-                        Icon(if (running) Icons.Default.Pause else Icons.Default.PlayArrow, if (running) "Pause" else "Start", modifier = Modifier.size(36.dp))
-                    }
-                }
-
-                FilledTonalIconButton(
-                    onClick = { TimerManager.skipOrRecord(context) },
-                    modifier = Modifier.size(56.dp)
+                LargeFloatingActionButton(
+                    onClick = { TimerManager.toggleTimer(context) },
+                    containerColor = if (TimerManager.isTimerRunning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = if (TimerManager.isTimerRunning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                    shape = CircleShape
                 ) {
-                    val baseTime = if (TimerManager.isStudyPhase) TimerManager.studyMinutes * 60 else TimerManager.breakMinutes * 60
-                    val isSessionActive = TimerManager.isTimerRunning || TimerManager.timeLeftSeconds != baseTime
+                    Icon(if (TimerManager.isTimerRunning) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(36.dp))
+                }
 
-                    val icon = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) {
-                        Icons.Default.FreeBreakfast
-                    } else if (!TimerManager.isStopwatchMode && isSessionActive) {
-                        Icons.Default.Stop
-                    } else {
-                        Icons.Default.SkipNext
-                    }
-
-                    Icon(icon, "Break / Skip / Stop")
+                OutlinedIconButton(onClick = { TimerManager.skipOrRecord(context) }, modifier = Modifier.size(56.dp)) {
+                    val icon = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) Icons.Default.FreeBreakfast else Icons.Default.SkipNext
+                    Icon(icon, null)
                 }
             }
+
+            Spacer(Modifier.height(48.dp))
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 32.dp), color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(32.dp))
 
-            // Settings
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Spacer(Modifier.height(24.dp))
-                Text("Settings", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.height(16.dp))
+            // Settings Section
+            Text("Settings", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(24.dp))
 
-                AnimatedVisibility(visible = !TimerManager.isStopwatchMode) {
-                    Row(
-                        modifier = Modifier.padding(bottom = 16.dp).clip(RoundedCornerShape(8.dp)).clickable { TimerManager.autoStartBreaks = !TimerManager.autoStartBreaks }.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(checked = TimerManager.autoStartBreaks, onCheckedChange = { TimerManager.autoStartBreaks = it })
-                        Text("Auto-start next phase without asking", fontSize = 14.sp)
-                    }
+            AnimatedVisibility(visible = !TimerManager.isStopwatchMode) {
+                Row(
+                    modifier = Modifier.padding(bottom = 16.dp).clip(RoundedCornerShape(12.dp)).clickable { TimerManager.autoStartBreaks = !TimerManager.autoStartBreaks }.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = TimerManager.autoStartBreaks, onCheckedChange = { TimerManager.autoStartBreaks = it })
+                    Text("Auto-start breaks", style = MaterialTheme.typography.bodyMedium)
                 }
+            }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (TimerManager.isStopwatchMode) "Study Milestone" else "Study Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (TimerManager.isStopwatchMode) {
-                        Box {
-                            IconButton(onClick = { showStudyInfo = true }, modifier = Modifier.size(24.dp).padding(start = 4.dp)) {
-                                Icon(Icons.Default.Info, "Info", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            }
-                            DropdownMenu(expanded = showStudyInfo, onDismissRequest = { showStudyInfo = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                                Text("In Stopwatch mode, this sets a milestone to gently remind you to take a break without stopping your flow state.", modifier = Modifier.width(220.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (TimerManager.isStopwatchMode) "Study Milestone" else "Study Duration", style = MaterialTheme.typography.labelLarge)
+                IconButton(onClick = { if (TimerManager.isStopwatchMode) showStudyInfo = true }, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Info, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                 }
+            }
 
-                Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1, 2, 25, 50, 90).forEach { min ->
-                        FilterChip(
-                            selected = TimerManager.studyMinutes == min,
-                            onClick = {
-                                TimerManager.studyMinutes = min
-                                if (!TimerManager.isTimerRunning && TimerManager.isStudyPhase && !TimerManager.isStopwatchMode) {
-                                    TimerManager.currentPhaseTotalSeconds = min * 60
-                                    TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
-                                }
-                            },
-                            label = { Text("${min}m") },
-                            enabled = !TimerManager.isTimerRunning
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Break Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (TimerManager.isStopwatchMode) {
-                        Box {
-                            IconButton(onClick = { showBreakInfo = true }, modifier = Modifier.size(24.dp).padding(start = 4.dp)) {
-                                Icon(Icons.Default.Info, "Info", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            Row(Modifier.padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(25, 50, 90).forEach { min ->
+                    FilterChip(
+                        selected = TimerManager.studyMinutes == min,
+                        onClick = {
+                            TimerManager.studyMinutes = min
+                            if (!TimerManager.isTimerRunning && TimerManager.isStudyPhase && !TimerManager.isStopwatchMode) {
+                                TimerManager.currentPhaseTotalSeconds = min * 60
+                                TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
                             }
-                            DropdownMenu(expanded = showBreakInfo, onDismissRequest = { showBreakInfo = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                                Text("If you accept a break suggestion, the stopwatch pauses and a temporary break countdown takes over.", modifier = Modifier.width(220.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-
-                Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1, 2, 5, 10, 15).forEach { min ->
-                        FilterChip(
-                            selected = TimerManager.breakMinutes == min,
-                            onClick = {
-                                TimerManager.breakMinutes = min
-                                if (!TimerManager.isTimerRunning && !TimerManager.isStudyPhase) {
-                                    TimerManager.currentPhaseTotalSeconds = min * 60
-                                    TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
-                                }
-                            },
-                            label = { Text("${min}m") },
-                            enabled = !TimerManager.isTimerRunning
-                        )
-                    }
+                        },
+                        label = { Text("${min}m") },
+                        enabled = !TimerManager.isTimerRunning
+                    )
                 }
             }
         }
@@ -852,6 +818,19 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
     var showThemeDialog by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let {
+            val backup = BackupData(
+                chapters = DataRepository.chapters.toList(),
+                studyHistory = DataRepository.studyHistory.toList()
+            )
+            val jsonString = Json { prettyPrint = true }.encodeToString(backup)
+            saveBackupToUri(context, it, jsonString)
+        }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -863,6 +842,11 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
 
                 NavigationDrawerItem(icon = { Icon(Icons.Default.Palette, "Theme") }, label = { Text("App Theme") }, selected = false, onClick = { scope.launch { drawerState.close() }; showThemeDialog = true }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
                 NavigationDrawerItem(icon = { Icon(Icons.Default.History, "History") }, label = { Text("Study History") }, selected = false, onClick = { scope.launch { drawerState.close() }; onHistoryClick() }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+                NavigationDrawerItem(icon = { Icon(Icons.Default.Backup, "Backup") }, label = { Text("Export Backup") }, selected = false, onClick = {
+                    scope.launch { drawerState.close() }
+                    val fileName = "JEE_Backup_${System.currentTimeMillis()}.json"
+                    exportLauncher.launch(fileName)
+                }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
                 NavigationDrawerItem(icon = { Icon(Icons.Default.Email, "Help") }, label = { Text("Help & Support") }, selected = false, onClick = { scope.launch { drawerState.close() }; context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SENDTO).apply { data = Uri.parse("mailto:"); putExtra(Intent.EXTRA_EMAIL, arrayOf("t.preethivardhanreddy@gmail.com")); putExtra(Intent.EXTRA_SUBJECT, "JEE War Room - Support") }, "Send Email")) }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
             }
         }
@@ -877,6 +861,15 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
                         IconButton(onClick = onHistoryClick) { Icon(Icons.Default.History, "History") }
                         IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Export Backup") },
+                                onClick = {
+                                    showMenu = false
+                                    val fileName = "JEE_Backup_${System.currentTimeMillis()}.json"
+                                    exportLauncher.launch(fileName)
+                                },
+                                leadingIcon = { Icon(Icons.Default.CloudUpload, null) }
+                            )
                             DropdownMenuItem(text = { Text("Help & Support") }, onClick = { showMenu = false; context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SENDTO).apply { data = Uri.parse("mailto:"); putExtra(Intent.EXTRA_EMAIL, arrayOf("t.preethivardhanreddy@gmail.com")); putExtra(Intent.EXTRA_SUBJECT, "JEE War Room - Support") }, "Send Email")) }, leadingIcon = { Icon(Icons.Default.Email, null) })
                         }
                     },
@@ -941,20 +934,27 @@ fun ThemeDialog(currentTheme: AppTheme, onThemeSelected: (AppTheme) -> Unit, onD
 fun SubjectCard(subject: Subject, letter: String, onClick: () -> Unit) {
     val counts = DataRepository.getStatusCounts(subject)
     val (weak, review, mastered) = listOf(counts[Status.RED] ?: 0, counts[Status.YELLOW] ?: 0, counts[Status.GREEN] ?: 0)
+    val total = weak + review + mastered
 
-    ElevatedCard(onClick = onClick, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-        Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(contentAlignment = Alignment.Center) {
+    ElevatedCard(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().height(120.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxSize().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(80.dp)) {
                 CircularProgress(weak, review, mastered)
-                Text(letter, fontSize = 42.sp, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.onSurface)
+                Text(letter, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
             }
-            Spacer(Modifier.width(24.dp))
-            Column {
-                Text(subject.name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("$weak Weak • $review Review", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("$mastered Mastered", fontSize = 14.sp, color = Status.GREEN.color, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(20.dp))
+            Column(Modifier.weight(1f)) {
+                Text(subject.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                val progress = if (total > 0) (mastered.toFloat() / total * 100).toInt() else 0
+                Text("$progress% Mastered", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
@@ -962,24 +962,29 @@ fun SubjectCard(subject: Subject, letter: String, onClick: () -> Unit) {
 @Composable
 fun CircularProgress(weak: Int, review: Int, mastered: Int) {
     val total = weak + review + mastered
-    val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
-    Canvas(Modifier.size(100.dp)) {
-        val strokeWidth = 12.dp.toPx()
+    val isDark = isSystemInDarkTheme()
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+
+    Canvas(Modifier.fillMaxSize()) {
+        val strokeWidth = 8.dp.toPx()
         val radius = (size.minDimension - strokeWidth) / 2
-        if (total == 0) drawCircle(trackColor, radius, style = Stroke(strokeWidth, cap = StrokeCap.Round)) else {
+
+        drawCircle(trackColor, radius, style = Stroke(strokeWidth))
+
+        if (total > 0) {
             var startAngle = -90f
             if (mastered > 0) {
                 val ang = (mastered.toFloat() / total) * 360f
-                drawArc(Status.GREEN.color, startAngle, ang, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
+                drawArc(if (isDark) Status.GREEN.darkColor else Status.GREEN.lightColor, startAngle, ang, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
                 startAngle += ang
             }
             if (review > 0) {
                 val ang = (review.toFloat() / total) * 360f
-                drawArc(Status.YELLOW.color, startAngle, ang, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
+                drawArc(if (isDark) Status.YELLOW.darkColor else Status.YELLOW.lightColor, startAngle, ang, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
                 startAngle += ang
             }
             if (weak > 0) {
-                drawArc(Status.RED.color, startAngle, (weak.toFloat() / total) * 360f, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
+                drawArc(if (isDark) Status.RED.darkColor else Status.RED.lightColor, startAngle, (weak.toFloat() / total) * 360f, false, style = Stroke(strokeWidth, cap = StrokeCap.Round), topLeft = Offset(strokeWidth / 2, strokeWidth / 2), size = Size(size.width - strokeWidth, size.height - strokeWidth))
             }
         }
     }
@@ -1052,9 +1057,9 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = filterRed, onClick = { filterRed = !filterRed }, label = { Text("Weak") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.RED.color.copy(alpha = 0.2f), selectedLabelColor = Status.RED.color))
-                FilterChip(selected = filterYellow, onClick = { filterYellow = !filterYellow }, label = { Text("Review") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.YELLOW.color.copy(alpha = 0.2f), selectedLabelColor = Color(0xFFE6A800)))
-                FilterChip(selected = filterGreen, onClick = { filterGreen = !filterGreen }, label = { Text("Mastered") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.GREEN.color.copy(alpha = 0.2f), selectedLabelColor = Status.GREEN.color))
+                FilterChip(selected = filterRed, onClick = { filterRed = !filterRed }, label = { Text("Weak") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.RED.lightColor.copy(alpha = 0.2f), selectedLabelColor = Status.RED.lightColor))
+                FilterChip(selected = filterYellow, onClick = { filterYellow = !filterYellow }, label = { Text("Review") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.YELLOW.lightColor.copy(alpha = 0.2f), selectedLabelColor = Status.YELLOW.lightColor))
+                FilterChip(selected = filterGreen, onClick = { filterGreen = !filterGreen }, label = { Text("Mastered") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.GREEN.lightColor.copy(alpha = 0.2f), selectedLabelColor = Status.GREEN.lightColor))
             }
             val onAttachNoteCallback = remember(onAttachNote) { onAttachNote }
 
@@ -1096,44 +1101,50 @@ fun ChapterCard(
     onMoveDown: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val actionButton = when (chapter.status) { Status.RED -> "Mark for Review"; Status.YELLOW -> "Mark Completed"; Status.GREEN -> "✨ Chill" }
+    val isDark = isSystemInDarkTheme()
+    val statusColor = if (isDark) chapter.status.darkColor else chapter.status.lightColor
+
     val hasNote = chapter.noteUri != null
     val noteIcon = if (hasNote) Icons.Default.Description else Icons.Default.Add
     val noteTint = if (hasNote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).combinedClickable(onClick = {}, onLongClick = { onLongPress(chapter) }),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+        shape = RoundedCornerShape(16.dp)
     ) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(16.dp).background(chapter.status.color, CircleShape))
+            Box(Modifier.size(12.dp).background(statusColor, CircleShape))
             Spacer(Modifier.width(16.dp))
-            Text(text = chapter.name, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(text = chapter.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                val dateStr = SimpleDateFormat("MMM dd", Locale.getDefault()).format(Date(chapter.lastModified))
+                Text("Last updated: $dateStr", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
 
             if (showReorderControls) {
                 IconButton(onClick = onMoveUp, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.KeyboardArrowUp, "Move Up")
+                    Icon(Icons.Default.KeyboardArrowUp, null)
                 }
                 IconButton(onClick = onMoveDown, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.KeyboardArrowDown, "Move Down")
+                    Icon(Icons.Default.KeyboardArrowDown, null)
                 }
-                Spacer(Modifier.width(4.dp))
             }
 
             IconButton(onClick = { if (hasNote) DataRepository.openNote(context, chapter.noteUri!!) else onAttachNote(chapter) }, modifier = Modifier.size(36.dp), colors = IconButtonDefaults.iconButtonColors(contentColor = noteTint)) {
-                Icon(noteIcon, if (hasNote) "Open Note" else "Attach Note")
+                Icon(noteIcon, null)
             }
-            IconButton(onClick = { val prev = when (chapter.status) { Status.GREEN -> Status.YELLOW; Status.YELLOW -> Status.RED; Status.RED -> Status.RED }; if (prev != chapter.status) DataRepository.updateChapterStatus(context, chapter, prev) }, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.outline)
-            }
-            Spacer(Modifier.width(8.dp))
-            if (chapter.status == Status.GREEN) {
-                Text(text = actionButton, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Status.GREEN.color, modifier = Modifier.padding(horizontal = 8.dp))
-            } else {
-                FilledTonalButton(onClick = { when (chapter.status) { Status.RED -> DataRepository.updateChapterStatus(context, chapter, Status.YELLOW); Status.YELLOW -> DataRepository.updateChapterStatus(context, chapter, Status.GREEN); Status.GREEN -> { } } }, modifier = Modifier.height(36.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
-                    Text(actionButton, fontSize = 13.sp)
+
+            IconButton(onClick = {
+                val nextStatus = when (chapter.status) {
+                    Status.RED -> Status.YELLOW
+                    Status.YELLOW -> Status.GREEN
+                    Status.GREEN -> Status.RED
                 }
+                DataRepository.updateChapterStatus(context, chapter, nextStatus)
+            }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Circle, null, tint = statusColor.copy(alpha = 0.3f))
             }
         }
     }
