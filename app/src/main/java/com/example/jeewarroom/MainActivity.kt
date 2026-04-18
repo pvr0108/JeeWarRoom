@@ -57,6 +57,13 @@ import kotlin.math.max
 enum class Subject { PHYSICS, CHEMISTRY, MATHS }
 enum class AppTheme(val label: String) { SYSTEM("System Default"), LIGHT("Light Mode"), DARK("Dark Mode") }
 enum class Status(val color: Color) { RED(Color(0xFFEF5350)), YELLOW(Color(0xFFFFC107)), GREEN(Color(0xFF66BB6A)) }
+enum class SortMode(val label: String) {
+    ASCENDING("A-Z"),
+    DESCENDING("Z-A"),
+    CUSTOM("Custom Order"),
+    DATE_NEWEST("Recently Modified"),
+    DATE_OLDEST("Oldest")
+}
 
 data class Chapter(
     val id: Int,
@@ -64,7 +71,8 @@ data class Chapter(
     val subject: Subject,
     var status: Status,
     var noteUri: String? = null,
-    var order: Int = 0
+    var order: Int = 0,
+    var lastModified: Long = System.currentTimeMillis()
 )
 
 data class StudyRecord(
@@ -163,10 +171,42 @@ object DataRepository {
         return chapters.filter { it.subject == subject }.sortedBy { it.order }
     }
 
+    fun moveChapterUp(context: Context, chapter: Chapter) {
+        val subjectChapters = chapters.filter { it.subject == chapter.subject }.sortedBy { it.order }
+        val index = subjectChapters.indexOfFirst { it.id == chapter.id }
+        if (index > 0) {
+            val prevChapter = subjectChapters[index - 1]
+            val tempOrder = chapter.order
+            val idx1 = chapters.indexOfFirst { it.id == chapter.id }
+            val idx2 = chapters.indexOfFirst { it.id == prevChapter.id }
+            if (idx1 != -1 && idx2 != -1) {
+                chapters[idx1] = chapters[idx1].copy(order = prevChapter.order)
+                chapters[idx2] = chapters[idx2].copy(order = tempOrder)
+                saveData(context)
+            }
+        }
+    }
+
+    fun moveChapterDown(context: Context, chapter: Chapter) {
+        val subjectChapters = chapters.filter { it.subject == chapter.subject }.sortedBy { it.order }
+        val index = subjectChapters.indexOfFirst { it.id == chapter.id }
+        if (index != -1 && index < subjectChapters.size - 1) {
+            val nextChapter = subjectChapters[index + 1]
+            val tempOrder = chapter.order
+            val idx1 = chapters.indexOfFirst { it.id == chapter.id }
+            val idx2 = chapters.indexOfFirst { it.id == nextChapter.id }
+            if (idx1 != -1 && idx2 != -1) {
+                chapters[idx1] = chapters[idx1].copy(order = nextChapter.order)
+                chapters[idx2] = chapters[idx2].copy(order = tempOrder)
+                saveData(context)
+            }
+        }
+    }
+
     fun updateChapterStatus(context: Context, chapter: Chapter, newStatus: Status) {
         val index = chapters.indexOfFirst { it.id == chapter.id }
         if (index != -1) {
-            chapters[index] = chapters[index].copy(status = newStatus)
+            chapters[index] = chapters[index].copy(status = newStatus, lastModified = System.currentTimeMillis())
             saveData(context)
         }
     }
@@ -174,7 +214,7 @@ object DataRepository {
     fun updateChapterNote(context: Context, chapter: Chapter, uri: Uri?) {
         val index = chapters.indexOfFirst { it.id == chapter.id }
         if (index != -1) {
-            chapters[index] = chapters[index].copy(noteUri = uri?.toString())
+            chapters[index] = chapters[index].copy(noteUri = uri?.toString(), lastModified = System.currentTimeMillis())
             saveData(context)
             if (uri != null) Toast.makeText(context, "Note Attached!", Toast.LENGTH_SHORT).show()
         }
@@ -954,7 +994,8 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     var filterYellow by remember { mutableStateOf(true) }
     var filterGreen by remember { mutableStateOf(true) }
     var chapterToDelete by remember { mutableStateOf<Chapter?>(null) }
-    var sortAscending by remember { mutableStateOf(true) }
+    var sortMode by rememberSaveable { mutableStateOf(SortMode.CUSTOM) }
+    var isReorderVisible by rememberSaveable { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
 
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -963,7 +1004,13 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
     val filteredChapters = DataRepository.getChaptersBySubject(subject).filter {
         when (it.status) { Status.RED -> filterRed; Status.YELLOW -> filterYellow; Status.GREEN -> filterGreen }
     }.let { list ->
-        if (sortAscending) list.sortedBy { it.name } else list.sortedByDescending { it.name }
+        when (sortMode) {
+            SortMode.ASCENDING -> list.sortedBy { it.name }
+            SortMode.DESCENDING -> list.sortedByDescending { it.name }
+            SortMode.CUSTOM -> list
+            SortMode.DATE_NEWEST -> list.sortedByDescending { it.lastModified }
+            SortMode.DATE_OLDEST -> list.sortedBy { it.lastModified }
+        }
     }
 
     Scaffold(
@@ -978,8 +1025,16 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
                             Icon(Icons.Default.Sort, "Sort")
                         }
                         DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
-                            DropdownMenuItem(text = { Text("Ascending") }, onClick = { sortAscending = true; showSortMenu = false })
-                            DropdownMenuItem(text = { Text("Descending") }, onClick = { sortAscending = false; showSortMenu = false })
+                            SortMode.values().forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    onClick = {
+                                        sortMode = mode
+                                        isReorderVisible = (mode == SortMode.CUSTOM)
+                                        showSortMenu = false
+                                    }
+                                )
+                            }
                         }
                     }
                 },
@@ -1001,14 +1056,22 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
                 FilterChip(selected = filterYellow, onClick = { filterYellow = !filterYellow }, label = { Text("Review") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.YELLOW.color.copy(alpha = 0.2f), selectedLabelColor = Color(0xFFE6A800)))
                 FilterChip(selected = filterGreen, onClick = { filterGreen = !filterGreen }, label = { Text("Mastered") }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Status.GREEN.color.copy(alpha = 0.2f), selectedLabelColor = Status.GREEN.color))
             }
+            val onAttachNoteCallback = remember(onAttachNote) { onAttachNote }
+
             LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
-                items(filteredChapters) { chapter ->
-                    ChapterCard(chapter = chapter, onAttachNote = onAttachNote, onLongPress = { chapterToDelete = it })
+                items(items = filteredChapters, key = { it.id }) { chapter ->
+                    ChapterCard(
+                        chapter = chapter,
+                        onAttachNote = onAttachNoteCallback,
+                        onLongPress = { chapterToDelete = it },
+                        showReorderControls = isReorderVisible && sortMode == SortMode.CUSTOM,
+                        onMoveUp = { DataRepository.moveChapterUp(context, chapter) },
+                        onMoveDown = { DataRepository.moveChapterDown(context, chapter) }
+                    )
                 }
             }
         }
     }
-
     if (showAddDialog) AddDialog(subject) { showAddDialog = false }
     if (chapterToDelete != null) {
         AlertDialog(
@@ -1024,7 +1087,14 @@ fun SubjectDetailScreen(subject: Subject, onBackClick: () -> Unit, onAttachNote:
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ChapterCard(chapter: Chapter, onAttachNote: (Chapter) -> Unit, onLongPress: (Chapter) -> Unit) {
+fun ChapterCard(
+    chapter: Chapter,
+    onAttachNote: (Chapter) -> Unit,
+    onLongPress: (Chapter) -> Unit,
+    showReorderControls: Boolean = false,
+    onMoveUp: () -> Unit = {},
+    onMoveDown: () -> Unit = {}
+) {
     val context = LocalContext.current
     val actionButton = when (chapter.status) { Status.RED -> "Mark for Review"; Status.YELLOW -> "Mark Completed"; Status.GREEN -> "✨ Chill" }
     val hasNote = chapter.noteUri != null
@@ -1040,6 +1110,16 @@ fun ChapterCard(chapter: Chapter, onAttachNote: (Chapter) -> Unit, onLongPress: 
             Box(Modifier.size(16.dp).background(chapter.status.color, CircleShape))
             Spacer(Modifier.width(16.dp))
             Text(text = chapter.name, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+
+            if (showReorderControls) {
+                IconButton(onClick = onMoveUp, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.KeyboardArrowUp, "Move Up")
+                }
+                IconButton(onClick = onMoveDown, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.KeyboardArrowDown, "Move Down")
+                }
+                Spacer(Modifier.width(4.dp))
+            }
 
             IconButton(onClick = { if (hasNote) DataRepository.openNote(context, chapter.noteUri!!) else onAttachNote(chapter) }, modifier = Modifier.size(36.dp), colors = IconButtonDefaults.iconButtonColors(contentColor = noteTint)) {
                 Icon(noteIcon, if (hasNote) "Open Note" else "Attach Note")
