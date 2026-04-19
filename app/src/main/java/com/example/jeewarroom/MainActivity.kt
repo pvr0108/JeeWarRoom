@@ -67,6 +67,8 @@ enum class SortMode(val label: String) {
     DATE_OLDEST("Oldest")
 }
 
+enum class ImportMode { REPLACE, APPEND_ALL, MERGE_UNIQUE }
+
 data class Chapter(
     val id: Int,
     val name: String,
@@ -142,18 +144,60 @@ object DataRepository {
             .edit().putString(KEY_DATA, gson.toJson(chapters)).apply()
     }
 
-    fun restoreBackup(context: Context, backup: BackupData) {
+    fun performImport(context: Context, backup: BackupData, mode: ImportMode) {
         try {
-            chapters.clear()
-            chapters.addAll(backup.chapters)
-            studyHistory.clear()
-            studyHistory.addAll(backup.studyHistory)
+            when (mode) {
+                ImportMode.REPLACE -> {
+                    chapters.clear()
+                    chapters.addAll(backup.chapters.map {
+                        if (it.lastModified == 0L) it.copy(lastModified = System.currentTimeMillis()) else it
+                    })
+                    studyHistory.clear()
+                    studyHistory.addAll(backup.studyHistory)
+                }
+                ImportMode.APPEND_ALL -> {
+                    addImportedChapters(backup.chapters)
+                    studyHistory.addAll(backup.studyHistory)
+                }
+                ImportMode.MERGE_UNIQUE -> {
+                    val existingKeys = chapters.map { it.subject to it.name.lowercase().trim() }.toSet()
+                    val toAdd = backup.chapters.filter {
+                        (it.subject to it.name.lowercase().trim()) !in existingKeys
+                    }
+                    addImportedChapters(toAdd)
+                    studyHistory.addAll(backup.studyHistory)
+                }
+            }
             saveData(context)
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit().putString(KEY_HISTORY, gson.toJson(studyHistory)).apply()
-            Toast.makeText(context, "Data Restored Successfully!", Toast.LENGTH_SHORT).show()
+
+            val msg = when(mode) {
+                ImportMode.REPLACE -> "Data Overwritten"
+                ImportMode.APPEND_ALL -> "Chapters Appended"
+                ImportMode.MERGE_UNIQUE -> "New Chapters Merged"
+            }
+            Toast.makeText(context, "$msg Successfully!", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Toast.makeText(context, "Restore Failed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Import Failed", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun addImportedChapters(newOnes: List<Chapter>) {
+        var currentMaxId = chapters.maxOfOrNull { it.id } ?: 1000
+
+        newOnes.groupBy { it.subject }.forEach { (subject, subjectChapters) ->
+            var currentMaxOrder = chapters.filter { it.subject == subject }.maxOfOrNull { it.order } ?: -1
+            subjectChapters.forEach { chapter ->
+                currentMaxId++
+                currentMaxOrder++
+                val fixedChapter = chapter.copy(
+                    id = currentMaxId,
+                    order = currentMaxOrder,
+                    lastModified = if (chapter.lastModified == 0L) System.currentTimeMillis() else chapter.lastModified
+                )
+                chapters.add(fixedChapter)
+            }
         }
     }
 
@@ -884,6 +928,8 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
     val scope = rememberCoroutineScope()
     var showMenu by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+    var pendingBackup by remember { mutableStateOf<BackupData?>(null) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -907,7 +953,12 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
                 context.contentResolver.openInputStream(it)?.use { inputStream ->
                     val jsonString = inputStream.bufferedReader().use { it.readText() }
                     val backup = Gson().fromJson(jsonString, BackupData::class.java)
-                    DataRepository.restoreBackup(context, backup)
+                    if (backup != null && backup.chapters != null) {
+                        pendingBackup = backup
+                        showImportDialog = true
+                    } else {
+                        Toast.makeText(context, "Invalid Backup File", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
                 Toast.makeText(context, "Invalid File Format", Toast.LENGTH_SHORT).show()
@@ -1004,6 +1055,62 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
     }
 
     if (showThemeDialog) ThemeDialog(currentTheme = DataRepository.currentTheme.value, onThemeSelected = { theme -> DataRepository.setTheme(context, theme) }, onDismiss = { showThemeDialog = false })
+    if (showImportDialog && pendingBackup != null) {
+        ImportOptionsDialog(
+            onDismiss = { showImportDialog = false; pendingBackup = null },
+            onModeSelected = { mode ->
+                DataRepository.performImport(context, pendingBackup!!, mode)
+                showImportDialog = false
+                pendingBackup = null
+            }
+        )
+    }
+}
+
+@Composable
+fun ImportOptionsDialog(onDismiss: () -> Unit, onModeSelected: (ImportMode) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import Chapters", fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text("How would you like to handle the imported chapters?", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+
+                ImportOptionItem(
+                    title = "Replace All",
+                    desc = "Wipe current data and replace with file content.",
+                    onClick = { onModeSelected(ImportMode.REPLACE) }
+                )
+                ImportOptionItem(
+                    title = "Append All",
+                    desc = "Keep current data and add everything from the file.",
+                    onClick = { onModeSelected(ImportMode.APPEND_ALL) }
+                )
+                ImportOptionItem(
+                    title = "Merge Unique",
+                    desc = "Keep current data and add only chapters not already present.",
+                    onClick = { onModeSelected(ImportMode.MERGE_UNIQUE) }
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
+fun ImportOptionItem(title: String, desc: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.primary)
+            Text(desc, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable
