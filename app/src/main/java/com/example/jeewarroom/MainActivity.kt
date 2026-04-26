@@ -1,6 +1,7 @@
 package com.example.jeewarroom
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -46,10 +47,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -102,6 +105,49 @@ fun saveBackupToUri(context: Context, uri: Uri, jsonData: String) {
         Toast.makeText(context, "Backup Saved!", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
+
+fun backupAndShareToDrive(context: Context, backupData: BackupData) {
+    val gson = GsonBuilder().setPrettyPrinting().create()
+    val jsonString = gson.toJson(backupData)
+
+    // 1. Create the file in internal cache
+    val fileName = "JEE_Backup_${System.currentTimeMillis()}.json"
+    val backupFile = File(context.cacheDir, fileName)
+
+    try {
+        backupFile.writeText(jsonString)
+
+        // 2. Generate the content:// URI
+        val contentUri: Uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            backupFile
+        )
+
+        // 3. Create Intent targeting Google Drive (com.google.android.apps.docs)
+        val driveIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/json"
+            putExtra(Intent.EXTRA_STREAM, contentUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            setPackage("com.google.android.apps.docs")
+        }
+
+        context.startActivity(driveIntent)
+
+    } catch (e: ActivityNotFoundException) {
+        // Fallback: Use standard share sheet if Google Drive isn't installed
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/json"
+            putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(
+                context, "${context.packageName}.fileprovider", backupFile
+            ))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Save Backup To..."))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -340,7 +386,6 @@ object DataRepository {
 // GLOBAL TIMER ENGINE (Survives Minimizing & Navigation)
 // ─────────────────────────────────────────────
 object TimerManager {
-    var isStopwatchMode by mutableStateOf(false)
     var studyMinutes by mutableIntStateOf(25)
     var breakMinutes by mutableIntStateOf(5)
     var autoStartBreaks by mutableStateOf(false)
@@ -348,7 +393,6 @@ object TimerManager {
     // NEW: Tracks the total time allocated to the current phase so math is always perfect
     var currentPhaseTotalSeconds by mutableIntStateOf(25 * 60)
     var timeLeftSeconds by mutableIntStateOf(25 * 60)
-    var stopwatchSeconds by mutableIntStateOf(0)
     var isTimerRunning by mutableStateOf(false)
     var isStudyPhase by mutableStateOf(true)
     var showPhaseCompleteDialog by mutableStateOf(false)
@@ -383,38 +427,19 @@ object TimerManager {
                     val deltaSeconds = (deltaMs / 1000L).toInt()
                     lastTickTime += deltaSeconds * 1000L // Maintain absolute precision
 
-                    if (isStopwatchMode) {
-                        if (isStudyPhase) {
-                            val milestone = studyMinutes * 60
-                            val prev = stopwatchSeconds
-                            stopwatchSeconds += deltaSeconds
+                    val prev = timeLeftSeconds
+                    timeLeftSeconds -= deltaSeconds
+                    if (prev > 0 && timeLeftSeconds <= 0) {
+                        if (autoStartBreaks) {
+                            // Mathematical perfection: Total allocated time minus whatever the clock says
+                            val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
+                            DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
 
-                            // Milestone Nudge Logic
-                            if (milestone > 0 && prev / milestone < stopwatchSeconds / milestone) {
-                                showPhaseCompleteDialog = true
-                            }
+                            isStudyPhase = !isStudyPhase
+                            currentPhaseTotalSeconds = if (isStudyPhase) studyMinutes * 60 else breakMinutes * 60
+                            timeLeftSeconds = currentPhaseTotalSeconds
                         } else {
-                            val prev = timeLeftSeconds
-                            timeLeftSeconds -= deltaSeconds
-                            if (prev > 0 && timeLeftSeconds <= 0 && !showPhaseCompleteDialog) {
-                                showPhaseCompleteDialog = true
-                            }
-                        }
-                    } else {
-                        val prev = timeLeftSeconds
-                        timeLeftSeconds -= deltaSeconds
-                        if (prev > 0 && timeLeftSeconds <= 0) {
-                            if (autoStartBreaks) {
-                                // Mathematical perfection: Total allocated time minus whatever the clock says
-                                val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
-                                DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
-
-                                isStudyPhase = !isStudyPhase
-                                currentPhaseTotalSeconds = if (isStudyPhase) studyMinutes * 60 else breakMinutes * 60
-                                timeLeftSeconds = currentPhaseTotalSeconds
-                            } else {
-                                showPhaseCompleteDialog = true
-                            }
+                            showPhaseCompleteDialog = true
                         }
                     }
                 }
@@ -423,40 +448,23 @@ object TimerManager {
     }
 
     fun skipOrRecord(context: Context) {
-        if (!isStopwatchMode) {
-            // Mathematical perfection: Total allocated time minus whatever the clock says
-            val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
-            if (actualTime > 0) {
-                DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
-            }
+        // Mathematical perfection: Total allocated time minus whatever the clock says
+        val actualTime = currentPhaseTotalSeconds - timeLeftSeconds
+        if (actualTime > 0) {
+            DataRepository.addRecord(context, actualTime, !isStudyPhase, "Timer")
         }
 
-        if (isStopwatchMode) {
-            if (isStudyPhase) {
-                isStudyPhase = false
-                currentPhaseTotalSeconds = breakMinutes * 60
-                timeLeftSeconds = currentPhaseTotalSeconds
-            } else {
-                isStudyPhase = true
-            }
-        } else {
-            isStudyPhase = !isStudyPhase
-            currentPhaseTotalSeconds = if (isStudyPhase) studyMinutes * 60 else breakMinutes * 60
-            timeLeftSeconds = currentPhaseTotalSeconds
-        }
+        isStudyPhase = !isStudyPhase
+        currentPhaseTotalSeconds = if (isStudyPhase) studyMinutes * 60 else breakMinutes * 60
+        timeLeftSeconds = currentPhaseTotalSeconds
         pauseTimer()
     }
 
     fun resetTimer() {
         pauseTimer()
-        if (isStopwatchMode) {
-            stopwatchSeconds = 0
-            isStudyPhase = true
-        } else {
-            isStudyPhase = true
-            currentPhaseTotalSeconds = studyMinutes * 60
-            timeLeftSeconds = currentPhaseTotalSeconds
-        }
+        isStudyPhase = true
+        currentPhaseTotalSeconds = studyMinutes * 60
+        timeLeftSeconds = currentPhaseTotalSeconds
     }
 }
 
@@ -621,9 +629,6 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    var showStudyInfo by remember { mutableStateOf(false) }
-    var showBreakInfo by remember { mutableStateOf(false) }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -639,78 +644,31 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
 
-            // Mode Slider
-            Row(
-                modifier = Modifier.fillMaxWidth(0.8f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(50)).padding(4.dp),
-                horizontalArrangement = Arrangement.Center
+            Surface(
+                color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primaryContainer else Status.GREEN.color.copy(alpha = 0.2f),
+                shape = CircleShape,
+                modifier = Modifier.padding(bottom = 24.dp)
             ) {
-                Box(
-                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(50))
-                        .background(if (!TimerManager.isStopwatchMode) MaterialTheme.colorScheme.primary else Color.Transparent)
-                        .clickable {
-                            if (TimerManager.isStopwatchMode) {
-                                TimerManager.isStopwatchMode = false
-                                TimerManager.pauseTimer()
-                            }
-                        }.padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("Timer", fontWeight = FontWeight.Bold, color = if (!TimerManager.isStopwatchMode) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Box(
-                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(50))
-                        .background(if (TimerManager.isStopwatchMode) MaterialTheme.colorScheme.primary else Color.Transparent)
-                        .clickable {
-                            if (!TimerManager.isStopwatchMode) {
-                                TimerManager.isStopwatchMode = true
-                                TimerManager.pauseTimer()
-                                TimerManager.isStudyPhase = true
-                            }
-                        }.padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("Stopwatch", fontWeight = FontWeight.Bold, color = if (TimerManager.isStopwatchMode) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                Text(
+                    if (TimerManager.isStudyPhase) "🔥 FOCUS MODE" else "☕ BREAK TIME",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.onPrimaryContainer else Status.GREEN.color,
+                    fontWeight = FontWeight.Bold
+                )
             }
-            Spacer(Modifier.height(32.dp))
-
-            AnimatedVisibility(visible = !TimerManager.isStopwatchMode || !TimerManager.isStudyPhase) {
-                Surface(
-                    color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primaryContainer else Status.GREEN.color.copy(alpha = 0.2f),
-                    shape = CircleShape,
-                    modifier = Modifier.padding(bottom = 24.dp)
-                ) {
-                    Text(
-                        if (TimerManager.isStudyPhase) "🔥 FOCUS MODE" else "☕ BREAK TIME",
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        color = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.onPrimaryContainer else Status.GREEN.color,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-            if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) Spacer(Modifier.height(48.dp))
 
             // Clock Display
             Box(contentAlignment = Alignment.Center, modifier = Modifier.size(280.dp)) {
                 val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
-                val progressColor = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else {
-                    if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else Status.GREEN.color
-                }
+                val progressColor = if (TimerManager.isStudyPhase) MaterialTheme.colorScheme.primary else Status.GREEN.color
 
                 // Calculates arc based on currentPhaseTotalSeconds so +5 mins seamlessly adjusts!
-                val targetSweepAngle = if (TimerManager.isStopwatchMode) {
-                    if (TimerManager.isStudyPhase) {
-                        (TimerManager.stopwatchSeconds % 60) / 60f * 360f
-                    } else {
-                        val t = TimerManager.currentPhaseTotalSeconds
-                        if (t > 0) (max(TimerManager.timeLeftSeconds, 0).toFloat() / t) * 360f else 0f
-                    }
-                } else {
+                val targetSweepAngle = {
                     val t = TimerManager.currentPhaseTotalSeconds
                     if (t > 0) (max(TimerManager.timeLeftSeconds, 0).toFloat() / t) * 360f else 0f
-                }
+                }()
 
-                val animatedSweepAngle by animateFloatAsState(targetValue = targetSweepAngle, animationSpec = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) tween(0) else tween(1000, easing = LinearEasing), label = "sweep")
+                val animatedSweepAngle by animateFloatAsState(targetValue = targetSweepAngle, animationSpec = tween(1000, easing = LinearEasing), label = "sweep")
 
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val strokeW = 14.dp.toPx()
@@ -718,8 +676,8 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                     drawArc(color = progressColor, startAngle = -90f, sweepAngle = animatedSweepAngle, useCenter = false, style = Stroke(strokeW, cap = StrokeCap.Round))
                 }
 
-                val isNegative = (!TimerManager.isStopwatchMode && TimerManager.timeLeftSeconds < 0) || (TimerManager.isStopwatchMode && !TimerManager.isStudyPhase && TimerManager.timeLeftSeconds < 0)
-                val displaySeconds = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) TimerManager.stopwatchSeconds else TimerManager.timeLeftSeconds
+                val isNegative = TimerManager.timeLeftSeconds < 0
+                val displaySeconds = TimerManager.timeLeftSeconds
                 val absSeconds = abs(displaySeconds)
                 val h = absSeconds / 3600
                 val m = (absSeconds % 3600) / 60
@@ -758,15 +716,8 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                     val baseTime = if (TimerManager.isStudyPhase) TimerManager.studyMinutes * 60 else TimerManager.breakMinutes * 60
                     val isSessionActive = TimerManager.isTimerRunning || TimerManager.timeLeftSeconds != baseTime
 
-                    val icon = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) {
-                        Icons.Default.FreeBreakfast
-                    } else if (!TimerManager.isStopwatchMode && isSessionActive) {
-                        Icons.Default.Stop
-                    } else {
-                        Icons.Default.SkipNext
-                    }
-
-                    Icon(icon, "Break / Skip / Stop")
+                    val icon = if (isSessionActive) Icons.Default.Stop else Icons.Default.SkipNext
+                    Icon(icon, "Skip / Stop")
                 }
             }
             Spacer(Modifier.height(32.dp))
@@ -778,37 +729,22 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                 Text("Settings", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.height(16.dp))
 
-                AnimatedVisibility(visible = !TimerManager.isStopwatchMode) {
-                    Row(
-                        modifier = Modifier.padding(bottom = 16.dp).clip(RoundedCornerShape(8.dp)).clickable { TimerManager.autoStartBreaks = !TimerManager.autoStartBreaks }.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(checked = TimerManager.autoStartBreaks, onCheckedChange = { TimerManager.autoStartBreaks = it })
-                        Text("Auto-start next phase without asking", fontSize = 14.sp)
-                    }
+                Row(
+                    modifier = Modifier.padding(bottom = 16.dp).clip(RoundedCornerShape(8.dp)).clickable { TimerManager.autoStartBreaks = !TimerManager.autoStartBreaks }.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = TimerManager.autoStartBreaks, onCheckedChange = { TimerManager.autoStartBreaks = it })
+                    Text("Auto-start next phase without asking", fontSize = 14.sp)
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (TimerManager.isStopwatchMode) "Study Milestone" else "Study Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (TimerManager.isStopwatchMode) {
-                        Box {
-                            IconButton(onClick = { showStudyInfo = true }, modifier = Modifier.size(24.dp).padding(start = 4.dp)) {
-                                Icon(Icons.Default.Info, "Info", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            }
-                            DropdownMenu(expanded = showStudyInfo, onDismissRequest = { showStudyInfo = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                                Text("In Stopwatch mode, this sets a milestone to gently remind you to take a break without stopping your flow state.", modifier = Modifier.width(220.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-
+                Text("Study Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(1, 2, 25, 50, 90).forEach { min ->
                         FilterChip(
                             selected = TimerManager.studyMinutes == min,
                             onClick = {
                                 TimerManager.studyMinutes = min
-                                if (!TimerManager.isTimerRunning && TimerManager.isStudyPhase && !TimerManager.isStopwatchMode) {
+                                if (!TimerManager.isTimerRunning && TimerManager.isStudyPhase) {
                                     TimerManager.currentPhaseTotalSeconds = min * 60
                                     TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
                                 }
@@ -819,20 +755,7 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Break Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (TimerManager.isStopwatchMode) {
-                        Box {
-                            IconButton(onClick = { showBreakInfo = true }, modifier = Modifier.size(24.dp).padding(start = 4.dp)) {
-                                Icon(Icons.Default.Info, "Info", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            }
-                            DropdownMenu(expanded = showBreakInfo, onDismissRequest = { showBreakInfo = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                                Text("If you accept a break suggestion, the stopwatch pauses and a temporary break countdown takes over.", modifier = Modifier.width(220.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-
+                Text("Break Duration", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(1, 2, 5, 10, 15).forEach { min ->
                         FilterChip(
@@ -854,8 +777,8 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
     }
 
     if (TimerManager.showPhaseCompleteDialog) {
-        val title = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) "Milestone Reached!" else if (TimerManager.isStudyPhase) "Focus Session Complete!" else "Break Over!"
-        val text = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) "You've been in the zone for ${TimerManager.studyMinutes} minutes! Want to keep your flow state, or take a quick break?" else if (TimerManager.isStudyPhase) "Great job hitting your target! You can start your break now, or add 5 more minutes if you're in the zone." else if (TimerManager.isStopwatchMode) "Time to get back to the War Room! Your stopwatch is waiting." else "Time to get back to the War Room! Ready to start focusing again?"
+        val title = if (TimerManager.isStudyPhase) "Focus Session Complete!" else "Break Over!"
+        val text = if (TimerManager.isStudyPhase) "Great job hitting your target! You can start your break now, or add 5 more minutes if you're in the zone." else "Time to get back to the War Room! Ready to start focusing again?"
 
         AlertDialog(
             onDismissRequest = { },
@@ -864,29 +787,18 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
             text = { Text(text) },
             confirmButton = {
                 Button(onClick = {
-                    if (!TimerManager.isStopwatchMode) {
-                        val actualTime = TimerManager.currentPhaseTotalSeconds - TimerManager.timeLeftSeconds
-                        DataRepository.addRecord(context, actualTime, !TimerManager.isStudyPhase, "Timer")
-                    }
+                    val actualTime = TimerManager.currentPhaseTotalSeconds - TimerManager.timeLeftSeconds
+                    DataRepository.addRecord(context, actualTime, !TimerManager.isStudyPhase, "Timer")
                     TimerManager.showPhaseCompleteDialog = false
-
-                    if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) {
-                        TimerManager.isStudyPhase = false
-                        TimerManager.currentPhaseTotalSeconds = TimerManager.breakMinutes * 60
-                        TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
-                    } else if (TimerManager.isStopwatchMode && !TimerManager.isStudyPhase) {
-                        TimerManager.isStudyPhase = true
-                    } else {
-                        TimerManager.isStudyPhase = !TimerManager.isStudyPhase
-                        TimerManager.currentPhaseTotalSeconds = if (TimerManager.isStudyPhase) TimerManager.studyMinutes * 60 else TimerManager.breakMinutes * 60
-                        TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
-                    }
+                    TimerManager.isStudyPhase = !TimerManager.isStudyPhase
+                    TimerManager.currentPhaseTotalSeconds = if (TimerManager.isStudyPhase) TimerManager.studyMinutes * 60 else TimerManager.breakMinutes * 60
+                    TimerManager.timeLeftSeconds = TimerManager.currentPhaseTotalSeconds
                 }) {
-                    Text(if (TimerManager.isStudyPhase && TimerManager.isStopwatchMode) "Take Break" else if (TimerManager.isStudyPhase) "Start Break" else "Resume Focus")
+                    Text(if (TimerManager.isStudyPhase) "Start Break" else "Resume Focus")
                 }
             },
             dismissButton = {
-                if (TimerManager.isStudyPhase && !TimerManager.isStopwatchMode) {
+                if (TimerManager.isStudyPhase) {
                     OutlinedButton(onClick = {
                         TimerManager.showPhaseCompleteDialog = false
                         TimerManager.currentPhaseTotalSeconds += 5 * 60
@@ -894,18 +806,10 @@ fun PomodoroScreen(onBackClick: () -> Unit) {
                     }) {
                         Text("+5 Mins Focus")
                     }
-                } else if (TimerManager.isStudyPhase && TimerManager.isStopwatchMode) {
-                    OutlinedButton(onClick = {
-                        TimerManager.showPhaseCompleteDialog = false
-                    }) {
-                        Text("Keep Grinding")
-                    }
                 } else {
                     OutlinedButton(onClick = {
-                        if (!TimerManager.isStopwatchMode) {
-                            val actualTime = TimerManager.currentPhaseTotalSeconds - TimerManager.timeLeftSeconds
-                            DataRepository.addRecord(context, actualTime, !TimerManager.isStudyPhase, "Timer")
-                        }
+                        val actualTime = TimerManager.currentPhaseTotalSeconds - TimerManager.timeLeftSeconds
+                        DataRepository.addRecord(context, actualTime, !TimerManager.isStudyPhase, "Timer")
                         TimerManager.showPhaseCompleteDialog = false
                         TimerManager.isStudyPhase = true
                         TimerManager.currentPhaseTotalSeconds = TimerManager.studyMinutes * 60
@@ -986,6 +890,11 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
                     scope.launch { drawerState.close() }
                     importLauncher.launch(arrayOf("application/json"))
                 }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+                NavigationDrawerItem(icon = { Icon(Icons.Default.CloudSync, "Drive") }, label = { Text("Cloud Backup (Drive)") }, selected = false, onClick = {
+                    scope.launch { drawerState.close() }
+                    val data = BackupData(DataRepository.chapters.toList(), DataRepository.studyHistory.toList())
+                    backupAndShareToDrive(context, data)
+                }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
                 NavigationDrawerItem(icon = { Icon(Icons.Default.Email, "Help") }, label = { Text("Help & Support") }, selected = false, onClick = { scope.launch { drawerState.close() }; context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SENDTO).apply { data = Uri.parse("mailto:"); putExtra(Intent.EXTRA_EMAIL, arrayOf("t.preethivardhanreddy@gmail.com")); putExtra(Intent.EXTRA_SUBJECT, "JEE War Room - Support") }, "Send Email")) }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
             }
         }
@@ -1025,8 +934,8 @@ fun MainDashboard(onSubjectClick: (Subject) -> Unit, onPomodoroClick: () -> Unit
             },
             floatingActionButton = {
                 val fabText = if (TimerManager.isTimerRunning) {
-                    val sec = if (TimerManager.isStopwatchMode && TimerManager.isStudyPhase) TimerManager.stopwatchSeconds else abs(TimerManager.timeLeftSeconds)
-                    val sign = if (!TimerManager.isStopwatchMode && TimerManager.timeLeftSeconds < 0) "-" else ""
+                    val sec = abs(TimerManager.timeLeftSeconds)
+                    val sign = if (TimerManager.timeLeftSeconds < 0) "-" else ""
                     String.format("Timer: %s%02d:%02d", sign, (sec % 3600) / 60, sec % 60)
                 } else {
                     "War Room Timer"
